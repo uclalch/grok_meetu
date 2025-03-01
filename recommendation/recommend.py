@@ -6,15 +6,20 @@ import datetime
 import argparse
 import json
 from surprise import accuracy
+from cassandra.cluster import Cluster
+import logging
+
+logger = logging.getLogger(__name__)
 
 class RecommendationSystem:
-    def __init__(self, users, chatrooms, interactions):
-        self.users = users
-        self.chatrooms = chatrooms
-        self.interactions = interactions
+    def __init__(self, db_hosts=['localhost'], db_port=9042):
+        """Initialize with database connection instead of DataFrames"""
+        self.cluster = Cluster(db_hosts, port=db_port)
+        self.session = self.cluster.connect('grok_meetu')
         self.model = None
         self.model_dir = Path("/Users/larryli/Documents/Sobriety/Companies/grok_meetu/recommendation/models")
         self.model_dir.mkdir(exist_ok=True)
+        self.last_loaded_version = None  # Track last loaded version
     
     def _get_latest_model_path(self) -> Path:
         """Get the path of today's model file if it exists"""
@@ -26,8 +31,20 @@ class RecommendationSystem:
         model_path = self._get_latest_model_path()
         if not model_path.exists():
             raise ValueError(f"No trained model found for today at {model_path}")
-        print(f"Loading model from {model_path}")
-        _, self.model = dump.load(str(model_path))
+        
+        logger.info(f"Loading model from {model_path}")
+        _, loaded_model = dump.load(str(model_path))
+        
+        # Get version info for logging
+        version_info = self._load_version_info(model_path)
+        current_version = version_info.get('timestamp')
+        
+        logger.info(f"Previous model version: {self.last_loaded_version}")
+        logger.info(f"Loading model version: {current_version}")
+        
+        self.model = loaded_model
+        self.last_loaded_version = current_version
+        return loaded_model
     
     def _save_version_info(self, model_path: Path, version_info: dict):
         """Save version info separately"""
@@ -45,9 +62,25 @@ class RecommendationSystem:
 
     def _get_model_version(self) -> str:
         """Get current model version"""
+        if self.model is None:
+            return None
+        return self.last_loaded_version  # Use tracked version instead of reading file
+
+    def _update_model_version(self):
+        """Update model version info to force reload"""
         model_path = self._get_latest_model_path()
-        version_info = self._load_version_info(model_path)
-        return version_info.get('timestamp', 'unknown')
+        if model_path.exists():
+            version_info = self._load_version_info(model_path)
+            # Update timestamp to force reload
+            version_info['timestamp'] = datetime.datetime.now().isoformat()
+            self._save_version_info(model_path, version_info)
+            logger.info(f"Updated model version to: {version_info['timestamp']}")
+            
+            # Force model reload
+            self.model = None
+            self.load_model()
+            return True
+        return False
 
     def train_model(self, test_size=0.2, force=False):
         """Train and save a new model"""
@@ -63,7 +96,18 @@ class RecommendationSystem:
         
         print("Training new model...")
         reader = Reader(rating_scale=(1, 5))
-        data = Dataset.load_from_df(self.interactions[["user_id", "chatroom_id", "satisfaction_score"]], reader)
+        
+        # ScyllaDB: Query and convert to DataFrame
+        rows = self.session.execute("""
+            SELECT user_id, chatroom_id, satisfaction_score 
+            FROM interactions
+        """)
+        interactions_df = pd.DataFrame(rows._current_rows)
+        data = Dataset.load_from_df(
+            interactions_df[["user_id", "chatroom_id", "satisfaction_score"]], 
+            reader
+        )
+        
         trainset, testset = train_test_split(data, test_size=test_size)
         
         # Train model
@@ -97,47 +141,63 @@ class RecommendationSystem:
         print(f"✅ Model saved to {model_path} with version: {version_info['timestamp']}")
         print(f"📊 Model metrics - RMSE: {rmse:.4f}, MAE: {mae:.4f}")
         
+        # After saving model, force version update
+        self._update_model_version()
+        
         return test_predictions
 
     def predict(self, user_id, chatroom_id):
         if self.model is None:
             raise ValueError("Model not trained yet.")
         
+        # Always check for latest model version
+        current_path = self._get_latest_model_path()
+        if current_path.exists():
+            current_version = self._load_version_info(current_path).get('timestamp')
+            model_version = self._get_model_version()
+            
+            # Force reload if versions don't match
+            if current_version != model_version:
+                logger.info(f"Found newer model version: {current_version}")
+                logger.info(f"Current version: {model_version}")
+                logger.info("Automatically reloading latest model...")
+                self.model = None
+                self.load_model()
+                logger.info("Model reloaded successfully")
+        
         prediction = self.model.predict(user_id, chatroom_id).est
-        version = self._get_model_version()
         
-        # Log prediction
-        log_entry = {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'model_version': version,
-            'user_id': user_id,
-            'chatroom_id': chatroom_id,
-            'prediction': float(prediction)
-        }
-        
-        # Append to log file
-        log_path = self.model_dir / 'predictions.jsonl'
-        with open(log_path, 'a') as f:
-            f.write(json.dumps(log_entry) + '\n')
+        # Log prediction details
+        logger.debug(f"Prediction for {user_id} -> {chatroom_id}: {prediction:.2f}")
+        logger.debug(f"Using model version: {self._get_model_version()}")
         
         return prediction
 
     def calculate_derived_features(self, user_id, chatroom_id):
-        user = self.users[self.users["user_id"] == user_id].iloc[0]
-        chatroom = self.chatrooms[self.chatrooms["chatroom_id"] == chatroom_id].iloc[0]
+        # Get user data from DB
+        user_row = self.session.execute("""
+            SELECT interests, level_of_pressure, platform_credit_score 
+            FROM users WHERE user_id = %s
+        """, (user_id,)).one()
+        
+        # Get chatroom data from DB
+        chatroom_row = self.session.execute("""
+            SELECT topics, vibe_score 
+            FROM chatrooms WHERE chatroom_id = %s
+        """, (chatroom_id,)).one()
         
         # Motivation match
-        user_interests = set(user["interests"])
-        chatroom_topics = set(chatroom["topics"])
+        user_interests = set(user_row.interests)
+        chatroom_topics = set(chatroom_row.topics)
         intersection = len(user_interests & chatroom_topics)
         union = len(user_interests | chatroom_topics)
         motivation_match = intersection / union if union > 0 else 0
         
         # Pressure compatibility
-        pressure_compatibility = 0.9 if user["level_of_pressure"] < 3 and chatroom["vibe_score"] > 3 else 0.6
+        pressure_compatibility = 0.9 if user_row.level_of_pressure < 3 and chatroom_row.vibe_score > 3 else 0.6
         
         # Credit access level
-        credit_score = user["platform_credit_score"]
+        credit_score = user_row.platform_credit_score
         credit_access_level = "full" if credit_score > 80 else "partial" if credit_score > 50 else "limited"
         
         return {
@@ -147,20 +207,72 @@ class RecommendationSystem:
         }
 
     def get_recommendations(self, user_id, motivation_threshold=0.1, pressure_threshold=0.7, required_credit_level="partial"):
-        joined_chatrooms = self.interactions[self.interactions["user_id"] == user_id]["chatroom_id"].tolist()
-        to_predict = [cid for cid in self.chatrooms["chatroom_id"] if cid not in joined_chatrooms]
+        """Get recommendations with detailed logging"""
+        logger.info(f"Getting recommendations for user {user_id}")
+        
+        # Get all chatrooms
+        chatroom_rows = self.session.execute("SELECT chatroom_id FROM chatrooms")
+        all_chatrooms = [row.chatroom_id for row in chatroom_rows]
+        logger.info(f"Found {len(all_chatrooms)} total chatrooms")
+        
+        # Get joined chatrooms
+        joined_rows = self.session.execute(
+            "SELECT chatroom_id FROM interactions WHERE user_id = %s", 
+            (user_id,)
+        )
+        joined_chatrooms = [row.chatroom_id for row in joined_rows]
+        logger.info(f"User has joined {len(joined_chatrooms)} chatrooms")
+        
+        # Find chatrooms to predict
+        to_predict = [cid for cid in all_chatrooms if cid not in joined_chatrooms]
+        logger.info(f"Found {len(to_predict)} chatrooms to predict")
+        
+        if not to_predict:
+            logger.warning("No new chatrooms to recommend")
+            return []
         
         recommendations = []
         for chatroom_id in to_predict:
-            pred_score = self.predict(user_id, chatroom_id)
-            derived = self.calculate_derived_features(user_id, chatroom_id)
-            if (derived["motivation_match"] > motivation_threshold and
-                derived["pressure_compatibility"] > pressure_threshold and
-                derived["credit_access_level"] == required_credit_level):
-                recommendations.append((chatroom_id, pred_score))
+            try:
+                pred_score = self.predict(user_id, chatroom_id)
+                derived = self.calculate_derived_features(user_id, chatroom_id)
+                logger.info(f"Evaluating chatroom {chatroom_id}:")
+                logger.info(f"• Motivation match: {derived['motivation_match']:.2f} (threshold: {motivation_threshold})")
+                logger.info(f"• Pressure compatibility: {derived['pressure_compatibility']:.2f} (threshold: {pressure_threshold})")
+                logger.info(f"• Credit level: {derived['credit_access_level']} (required: {required_credit_level})")
+                logger.info(f"• Predicted score: {pred_score:.2f}")
+                
+                if derived["motivation_match"] <= motivation_threshold:
+                    logger.info("❌ Filtered out: Low motivation match")
+                elif derived["pressure_compatibility"] <= pressure_threshold:
+                    logger.info("❌ Filtered out: Low pressure compatibility")
+                elif derived["credit_access_level"] != required_credit_level:
+                    logger.info("❌ Filtered out: Wrong credit level")
+                else:
+                    logger.info("✅ Adding to recommendations")
+                    recommendations.append((chatroom_id, pred_score))
+            except Exception as e:
+                logger.error(f"Error predicting for chatroom {chatroom_id}: {e}")
         
         recommendations.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"Returning {len(recommendations)} recommendations")
         return recommendations
+
+    def _get_data_from_db(self):
+        """Get data from ScyllaDB as DataFrames"""
+        # Get users
+        users_rows = self.session.execute("SELECT * FROM users")
+        users_df = pd.DataFrame(users_rows._current_rows)
+        
+        # Get chatrooms
+        chatrooms_rows = self.session.execute("SELECT * FROM chatrooms")
+        chatrooms_df = pd.DataFrame(chatrooms_rows._current_rows)
+        
+        # Get interactions
+        interactions_rows = self.session.execute("SELECT * FROM interactions")
+        interactions_df = pd.DataFrame(interactions_rows._current_rows)
+        
+        return users_df, chatrooms_df, interactions_df
 
 if __name__ == "__main__":
     import argparse
@@ -170,36 +282,26 @@ if __name__ == "__main__":
     parser.add_argument('--mode', choices=['train', 'infer'], default='infer',
                        help='Mode to run: train or infer')
     parser.add_argument('--force', action='store_true', 
-                       help='Force training even if model exists for today')
+                       help='Force training even if model exists for today (only with --mode train)')
     parser.add_argument('--test-size', type=float, default=0.2,
-                       help='Test set size for model evaluation')
+                       help='Test set size for model evaluation (only with --mode train)')
     parser.add_argument('--user-id', type=str, default="U2",
-                       help='User ID for inference')
+                       help='User ID for inference (only with --mode infer)')
     args = parser.parse_args()
 
-    # Example data setup
-    users = pd.DataFrame({
-        "user_id": ["U1", "U2", "U3"],
-        "interests": [["travel", "tech"], ["art", "relax", "gaming"], ["gaming", "music"]],
-        "level_of_pressure": [2, 1, 3],
-        "platform_credit_score": [92, 68, 85]
-    })
-
-    chatrooms = pd.DataFrame({
-        "chatroom_id": ["C1", "C2", "C3"],
-        "name": ["AI Travel Planners", "Artistic Chill Zone", "Indie Game Devs"],
-        "topics": [["AI", "travel"], ["art", "relax"], ["gaming", "coding"]],
-        "vibe_score": [4, 5, 4]
-    })
-
-    interactions = pd.DataFrame({
-        "user_id": ["U1", "U2", "U3"],
-        "chatroom_id": ["C1", "C2", "C3"],
-        "satisfaction_score": [5, 4, 5]
-    })
+    # Validate arguments
+    if args.mode == 'infer' and args.force:
+        print("\n❌ Error: --force can only be used with --mode train")
+        exit(1)
+    
+    if args.mode == 'infer' and args.test_size != 0.2:
+        print("\n❌ Warning: --test-size is ignored in infer mode")
+    
+    if args.mode == 'train' and args.user_id != "U2":
+        print("\n❌ Warning: --user-id is ignored in train mode")
 
     # Run the system
-    rec_sys = RecommendationSystem(users, chatrooms, interactions)
+    rec_sys = RecommendationSystem()
     
     if args.mode == 'train':
         rec_sys.train_model(force=args.force, test_size=args.test_size)
@@ -211,7 +313,11 @@ if __name__ == "__main__":
             # Print the recommendations
             print(f"\nRecommendations for {args.user_id}:")
             for chatroom_id, score in recommendations:
-                chatroom_name = chatrooms[chatrooms["chatroom_id"] == chatroom_id]["name"].values[0]
+                # Get chatroom name from DB instead of DataFrame
+                chatroom_row = rec_sys.session.execute("""
+                    SELECT name FROM chatrooms WHERE chatroom_id = %s
+                """, (chatroom_id,)).one()
+                chatroom_name = chatroom_row.name
                 print(f"- {chatroom_name}: Predicted Satisfaction = {score:.2f}")
                 
             # Print model info

@@ -17,48 +17,51 @@ app = FastAPI()
 def read_root():
     return {"message": "Hello, welcome to the Recommendation API!"}
 
-# Initialize the recommendation system (do this once when the app starts)
-users = pd.DataFrame({
-    "user_id": ["U1", "U2", "U3"],
-    "interests": [["travel", "tech"], ["art", "relax", "gaming"], ["gaming", "music"]],
-    "level_of_pressure": [2, 1, 3],
-    "platform_credit_score": [92, 68, 85]
-})
-
-chatrooms = pd.DataFrame({
-    "chatroom_id": ["C1", "C2", "C3"],
-    "name": ["AI Travel Planners", "Artistic Chill Zone", "Indie Game Devs"],
-    "topics": [["AI", "travel"], ["art", "relax"], ["gaming", "coding"]],
-    "vibe_score": [4, 5, 4]
-})
-
-interactions = pd.DataFrame({
-    "user_id": ["U1", "U2", "U3"],
-    "chatroom_id": ["C1", "C2", "C3"],
-    "satisfaction_score": [5, 4, 5]
-})
-
-# Initialize system with data
-rec_sys = RecommendationSystem(users=users, chatrooms=chatrooms, interactions=interactions)
+# Initialize system with ScyllaDB connection
+rec_sys = RecommendationSystem()  # Uses default localhost:9042
 
 # Define the /recommend endpoint
 @app.post("/recommend", response_model=RecommendResponse)
 async def recommend(request: RecommendRequest):
     try:
-        # Load model if not loaded
-        if rec_sys.model is None:
-            rec_sys.load_model()
+        # Always check for latest model
+        current_path = rec_sys._get_latest_model_path()
+        if current_path.exists():
+            latest_version = rec_sys._load_version_info(current_path).get('timestamp')
+            current_version = rec_sys.last_loaded_version
             
+            logger.info(f"Latest model version: {latest_version}")
+            logger.info(f"Currently loaded version: {current_version}")
+            
+            # Force reload if versions don't match or no model loaded
+            if current_version != latest_version:
+                logger.info(f"Model versions differ ({current_version} vs {latest_version})")
+                logger.info("Reloading latest model...")
+                rec_sys.load_model()
+            else:
+                logger.info("Using current model (versions match)")
+        else:
+            logger.warning("No model found, training new one...")
+            rec_sys.train_model(force=True)
+        
         user_id = request.user_id
         if not user_id:
             logger.warning("Missing user_id in request")
             raise HTTPException(status_code=400, detail="Missing user_id")
 
-        # Get recommendations from your system
-        recommendations = rec_sys.get_recommendations(user_id)
+        # Use less strict thresholds
+        recommendations = rec_sys.get_recommendations(
+            user_id,
+            motivation_threshold=0.1,  # Lower this if needed
+            pressure_threshold=0.5,    # Lower this if needed
+            required_credit_level="partial"  # Or change to match user's level
+        )
         if not recommendations:
             logger.info(f"No recommendations found for user_id: {user_id}")
-            raise HTTPException(status_code=404, detail="No recommendations found")
+            return {
+                "recommendations": [],
+                "model_info": rec_sys._load_version_info(rec_sys._get_latest_model_path())
+            }
 
         # Get current model info
         model_path = rec_sys._get_latest_model_path()
@@ -118,6 +121,18 @@ async def get_model_info():
             "path": str(model_path),
             "parameters": version_info['parameters']
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/update-model")
+async def update_model():
+    """Force model version update and reload"""
+    try:
+        if rec_sys._update_model_version():
+            return {"message": "Model version updated and reloaded", 
+                   "version": rec_sys._get_model_version()}
+        else:
+            raise HTTPException(status_code=404, detail="No model found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
