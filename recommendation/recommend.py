@@ -163,15 +163,21 @@ class RecommendationSystem:
         return recommendations
 
 if __name__ == "__main__":
+    import argparse
+    
     # Set up argument parser
-    parser = argparse.ArgumentParser(description='Train recommendation model')
+    parser = argparse.ArgumentParser(description='Train or run inference with recommendation model')
+    parser.add_argument('--mode', choices=['train', 'infer'], default='infer',
+                       help='Mode to run: train or infer')
     parser.add_argument('--force', action='store_true', 
                        help='Force training even if model exists for today')
     parser.add_argument('--test-size', type=float, default=0.2,
                        help='Test set size for model evaluation')
+    parser.add_argument('--user-id', type=str, default="U2",
+                       help='User ID for inference')
     args = parser.parse_args()
 
-    # Updated Users Data (only U2's interests modified)
+    # Example data setup
     users = pd.DataFrame({
         "user_id": ["U1", "U2", "U3"],
         "interests": [["travel", "tech"], ["art", "relax", "gaming"], ["gaming", "music"]],
@@ -194,11 +200,27 @@ if __name__ == "__main__":
 
     # Run the system
     rec_sys = RecommendationSystem(users, chatrooms, interactions)
-    rec_sys.train_model(force=args.force, test_size=args.test_size)
-    recommendations = rec_sys.get_recommendations("U2")
-
-    # Print the recommendations
-    print("Recommendations for U2:")
-    for chatroom_id, score in recommendations:
-        chatroom_name = chatrooms[chatrooms["chatroom_id"] == chatroom_id]["name"].values[0]
-        print(f"- {chatroom_name}: Predicted Satisfaction = {score:.2f}")
+    
+    if args.mode == 'train':
+        rec_sys.train_model(force=args.force, test_size=args.test_size)
+    else:  # infer mode
+        try:
+            rec_sys.load_model()  # Load existing model
+            recommendations = rec_sys.get_recommendations(args.user_id)
+            
+            # Print the recommendations
+            print(f"\nRecommendations for {args.user_id}:")
+            for chatroom_id, score in recommendations:
+                chatroom_name = chatrooms[chatrooms["chatroom_id"] == chatroom_id]["name"].values[0]
+                print(f"- {chatroom_name}: Predicted Satisfaction = {score:.2f}")
+                
+            # Print model info
+            model_path = rec_sys._get_latest_model_path()
+            model_info = rec_sys._load_version_info(model_path)
+            print("\nUsing model version:")
+            print(f"• Timestamp: {model_info['timestamp']}")
+            print(f"• Metrics: RMSE={model_info['metrics']['rmse']:.3f}, MAE={model_info['metrics']['mae']:.3f}")
+            
+        except ValueError as e:
+            print(f"\n❌ Error: {str(e)}")
+            print("Hint: Train a model first using --mode train")
