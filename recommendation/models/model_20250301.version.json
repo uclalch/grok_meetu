@@ -1,0 +1,14 @@
+{
+  "timestamp": "2025-03-01T17:43:05.503971",
+  "test_size": 0.2,
+  "parameters": {
+    "n_factors": 100,
+    "n_epochs": 20,
+    "lr_all": 0.005,
+    "reg_all": 0.02
+  },
+  "metrics": {
+    "rmse": 0.5,
+    "mae": 0.5
+  }
+}
