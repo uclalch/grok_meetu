@@ -1,0 +1,19 @@
+version: '3'
+services:
+  scylla:
+    image: scylladb/scylla
+    ports:
+      - "9042:9042"
+  
+  backend:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      - scylla
+    environment:
+      - SCYLLA_HOSTS=scylla
+    volumes:
+      - ./backend/recommendation/models:/app/recommendation/models 

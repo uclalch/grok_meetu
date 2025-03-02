@@ -163,7 +163,7 @@ class SetupManager:
             # Start user API
             user_port = self._get_available_port(8000)
             self.user_api = subprocess.Popen(
-                ["uvicorn", "app:app", "--port", str(user_port)],
+                ["uvicorn", "backend.app:app", "--port", str(user_port)],
                 cwd=Path(__file__).parent
             )
             logger.info(f"User API started at http://localhost:{user_port}")
@@ -171,7 +171,7 @@ class SetupManager:
             # Start admin API
             admin_port = self._get_available_port(user_port + 1)
             self.admin_api = subprocess.Popen(
-                ["uvicorn", "admin_app:admin_app", "--port", str(admin_port)],
+                ["uvicorn", "backend.admin_app:admin_app", "--port", str(admin_port)],
                 cwd=Path(__file__).parent
             )
             logger.info(f"Admin API started at http://localhost:{admin_port}")
