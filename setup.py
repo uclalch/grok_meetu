@@ -149,38 +149,109 @@ class SetupManager:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             return s.connect_ex(('localhost', port)) == 0
 
+    def _get_available_port(self, start_port: int) -> int:
+        """Get an available port starting from a given port"""
+        # Try more ports
+        for port in range(start_port, start_port + 20):  # Increased range
+            if not self._is_port_in_use(port):
+                return port
+        raise Exception(f"No available ports found in range {start_port}-{start_port+20}")
+
     def start_api(self):
-        """Start FastAPI server"""
-        port = 8000
-        while self._is_port_in_use(port) and port < 8010:
-            logger.warning(f"Port {port} is in use, trying {port + 1}")
-            port += 1
-        
+        """Start API servers"""
         try:
-            logger.info(f"Starting API server on port {port}...")
-            self.api_process = subprocess.Popen(
-                ["uvicorn", "app:app", "--port", str(port)],
+            # Start user API
+            user_port = self._get_available_port(8000)
+            self.user_api = subprocess.Popen(
+                ["uvicorn", "app:app", "--port", str(user_port)],
                 cwd=Path(__file__).parent
             )
-            logger.info(f"API server started at http://localhost:{port}")
+            logger.info(f"User API started at http://localhost:{user_port}")
+            
+            # Start admin API
+            admin_port = self._get_available_port(user_port + 1)
+            self.admin_api = subprocess.Popen(
+                ["uvicorn", "admin_app:admin_app", "--port", str(admin_port)],
+                cwd=Path(__file__).parent
+            )
+            logger.info(f"Admin API started at http://localhost:{admin_port}")
+            
         except Exception as e:
-            logger.error(f"Failed to start API: {e}")
+            logger.error(f"Failed to start APIs: {e}")
             raise
     
     def stop_all(self):
         """Stop all services"""
         try:
-            # Stop API
-            if self.api_process:
-                self.api_process.terminate()
-                logger.info("API server stopped")
+            logger.info("Starting cleanup process...")
+            cleanup_status = {"user_api": False, "admin_api": False, "uvicorn": False, "scylla": False}
+
+            # Stop user API
+            if hasattr(self, 'user_api'):
+                try:
+                    self.user_api.terminate()
+                    self.user_api.wait(timeout=5)  # Wait for process to terminate
+                    cleanup_status["user_api"] = True
+                    logger.info("✓ User API stopped successfully")
+                except Exception as e:
+                    logger.error(f"Failed to stop user API gracefully: {e}")
+            
+            # Stop admin API
+            if hasattr(self, 'admin_api'):
+                try:
+                    self.admin_api.terminate()
+                    self.admin_api.wait(timeout=5)  # Wait for process to terminate
+                    cleanup_status["admin_api"] = True
+                    logger.info("✓ Admin API stopped successfully")
+                except Exception as e:
+                    logger.error(f"Failed to stop admin API gracefully: {e}")
+            
+            # Kill any lingering uvicorn processes
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", "uvicorn"], 
+                    capture_output=True, 
+                    text=True
+                )
+                if result.stdout:
+                    pids = result.stdout.strip().split('\n')
+                    logger.info(f"Found {len(pids)} lingering uvicorn processes")
+                    subprocess.run(["pkill", "-f", "uvicorn"], capture_output=True)
+                    cleanup_status["uvicorn"] = True
+                    logger.info(f"✓ Cleaned up {len(pids)} uvicorn processes")
+                else:
+                    logger.info("No lingering uvicorn processes found")
+                    cleanup_status["uvicorn"] = True
+            except Exception as e:
+                logger.warning(f"Failed to clean up uvicorn processes: {e}")
             
             # Stop ScyllaDB
-            subprocess.run(["docker", "stop", self.scylla_container])
-            logger.info("ScyllaDB container stopped")
+            try:
+                # Check if container is running
+                result = subprocess.run(
+                    ["docker", "ps", "--filter", f"name={self.scylla_container}"],
+                    capture_output=True, text=True
+                )
+                if self.scylla_container in result.stdout:
+                    subprocess.run(["docker", "stop", self.scylla_container])
+                    cleanup_status["scylla"] = True
+                    logger.info("✓ ScyllaDB container stopped successfully")
+                else:
+                    logger.info("ScyllaDB container was not running")
+                    cleanup_status["scylla"] = True
+            except Exception as e:
+                logger.warning(f"Failed to stop ScyllaDB container: {e}")
+            
+            # Print cleanup summary
+            logger.info("\nCleanup Summary:")
+            for service, success in cleanup_status.items():
+                status = "✓ Cleaned" if success else "✗ Failed"
+                logger.info(f"{status:10} {service}")
             
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
+        finally:
+            logger.info("Cleanup process completed")
     
     def show_status(self):
         """Show status of all services"""
@@ -227,9 +298,9 @@ def main():
     
     try:
         if args.action in ['start', 'restart']:
-            if args.action == 'restart':
-                manager.stop_all()
-                time.sleep(2)
+            # Always stop existing services first
+            manager.stop_all()
+            time.sleep(2)  # Wait for processes to clean up
             
             manager.start_scylla()
             if not args.skip_db_setup:

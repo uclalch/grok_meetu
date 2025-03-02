@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import List, Optional
 
 # Define request and response models
 class RecommendRequest(BaseModel):
@@ -11,9 +12,22 @@ class RecommendationItem(BaseModel):
     prediction_timestamp: str
 
 class RecommendResponse(BaseModel):
-    recommendations: list[RecommendationItem]
+    recommendations: List[RecommendationItem]
     model_info: dict
 
 class TrainResponse(BaseModel):
     message: str
+
+class ModelInfo(BaseModel):
+    status: str
+    version: str
+    parameters: dict
+    metrics: Optional[dict] = None
+
+class ModelListResponse(BaseModel):
+    models: List[ModelInfo]
+
+class ModelActivateResponse(BaseModel):
+    message: str
+    activated_version: str
 
