@@ -215,6 +215,13 @@ class RecommendationSystem:
             "credit_access_level": credit_access_level
         }
 
+    def _validate_user(self, user_id: str) -> bool:
+        """Check if user exists in database"""
+        row = self.session.execute("""
+            SELECT user_id FROM users WHERE user_id = %s
+        """, (user_id,)).one()
+        return row is not None
+
     def get_recommendations(
         self, 
         user_id: str, 
@@ -223,6 +230,10 @@ class RecommendationSystem:
     ) -> List[RecommendationItem]:
         """Get recommendations with detailed logging"""
         logger.info(f"Getting recommendations for user {user_id}")
+        
+        # Validate user exists
+        if not self._validate_user(user_id):
+            raise ValueError(f"User {user_id} not found in database")
         
         # Use default thresholds if none provided
         thresholds = thresholds or {

@@ -32,6 +32,13 @@ async def read_root():
 async def create_recommendations(request: CreateRecommendationRequest):
     """Create recommendations for a user with optional filters"""
     try:
+        # Validate user exists
+        if not rec_sys._validate_user(request.user_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {request.user_id} not found"
+            )
+        
         # Check model version and reload if needed
         current_path = rec_sys._get_latest_model_path()
         if current_path.exists():
@@ -116,12 +123,23 @@ async def get_recommendations(
 async def delete_recommendations(user_id: str):
     """Delete recommendations for a user"""
     try:
+        # Validate user exists
+        if not rec_sys._validate_user(user_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {user_id} not found"
+            )
+        
+        # Check cache
         if user_id not in rec_sys._recommendation_cache:
             raise HTTPException(
                 status_code=404,
                 detail=f"No recommendations found for user {user_id}"
             )
+        
+        # Clear from cache
         rec_sys.clear_recommendations(user_id)
+        
         return {"message": f"Recommendations cleared for user {user_id}"}
     except HTTPException:
         raise
@@ -163,14 +181,7 @@ async def get_model_info():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-# curl -X PUT 'http://localhost:8000/recommendations/U2' -H 'Content-Type: application/json' -d '{
-#     "user_id": "U2",
-#     "thresholds": {
-#         "motivation": 0.2,
-#         "pressure": 0.6,
-#         "credit_level": "partial"
-#     }
-# }'
+# curl -X PUT 'http://localhost:8000/recommendations/U2' -H 'Content-Type: application/json' -d '{"user_id": "U2","thresholds": {"motivation": 0.2,"pressure": 0.6,"credit_level": "partial"}}'
 
 @app.put("/recommendations/{user_id}", response_model=RecommendationResponse)
 async def update_recommendations(
@@ -179,6 +190,13 @@ async def update_recommendations(
 ):
     """Update recommendations for a user"""
     try:
+        # Validate user exists
+        if not rec_sys._validate_user(user_id):
+            raise HTTPException(
+                status_code=404,
+                detail=f"User {user_id} not found"
+            )
+        
         # Check if recommendations exist
         if user_id not in rec_sys._recommendation_cache:
             raise HTTPException(
