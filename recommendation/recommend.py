@@ -8,6 +8,8 @@ import json
 from surprise import accuracy
 from cassandra.cluster import Cluster
 import logging
+from typing import List, Optional
+from api.api_models import RecommendationItem, RecommendationFilter
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,8 @@ class RecommendationSystem:
         self.model_dir = Path("/Users/larryli/Documents/Sobriety/Companies/grok_meetu/recommendation/models")
         self.model_dir.mkdir(exist_ok=True)
         self.last_loaded_version = None  # Track last loaded version
+        self._recommendation_cache = {}  # Simple in-memory cache
+        self._user_preferences = {}      # Store user preferences
     
     def _get_latest_model_path(self) -> Path:
         """Get the path of today's model file if it exists"""
@@ -206,14 +210,40 @@ class RecommendationSystem:
             "credit_access_level": credit_access_level
         }
 
-    def get_recommendations(self, user_id, motivation_threshold=0.1, pressure_threshold=0.7, required_credit_level="partial"):
+    def get_recommendations(
+        self, 
+        user_id: str, 
+        filters: Optional[RecommendationFilter] = None,
+        thresholds: Optional[dict] = None
+    ) -> List[RecommendationItem]:
         """Get recommendations with detailed logging"""
         logger.info(f"Getting recommendations for user {user_id}")
         
+        # Use default thresholds if none provided
+        thresholds = thresholds or {
+            "motivation": 0.1,
+            "pressure": 0.5,
+            "credit_level": "partial"
+        }
+        
         # Get all chatrooms
-        chatroom_rows = self.session.execute("SELECT chatroom_id FROM chatrooms")
-        all_chatrooms = [row.chatroom_id for row in chatroom_rows]
-        logger.info(f"Found {len(all_chatrooms)} total chatrooms")
+        chatroom_rows = self.session.execute("SELECT chatroom_id, topics, vibe_score FROM chatrooms")
+        all_chatrooms = []
+        
+        # Apply filters to chatrooms first
+        for row in chatroom_rows:
+            if filters:
+                # Apply topic filter
+                if filters.topics and not set(filters.topics).intersection(set(row.topics)):
+                    continue
+                
+                # Apply vibe score filter
+                if filters.min_vibe_score and row.vibe_score < filters.min_vibe_score:
+                    continue
+                
+            all_chatrooms.append(row.chatroom_id)
+        
+        logger.info(f"Found {len(all_chatrooms)} matching chatrooms after filtering")
         
         # Get joined chatrooms
         joined_rows = self.session.execute(
@@ -236,25 +266,37 @@ class RecommendationSystem:
             try:
                 pred_score = self.predict(user_id, chatroom_id)
                 derived = self.calculate_derived_features(user_id, chatroom_id)
-                logger.info(f"Evaluating chatroom {chatroom_id}:")
-                logger.info(f"• Motivation match: {derived['motivation_match']:.2f} (threshold: {motivation_threshold})")
-                logger.info(f"• Pressure compatibility: {derived['pressure_compatibility']:.2f} (threshold: {pressure_threshold})")
-                logger.info(f"• Credit level: {derived['credit_access_level']} (required: {required_credit_level})")
-                logger.info(f"• Predicted score: {pred_score:.2f}")
                 
-                if derived["motivation_match"] <= motivation_threshold:
+                # Add debug logging
+                logger.debug(f"Creating recommendation for chatroom {chatroom_id}:")
+                logger.debug(f"• Predicted score: {pred_score}")
+                logger.debug(f"• Derived features: {derived}")
+                
+                if derived["motivation_match"] <= thresholds['motivation']:
                     logger.info("❌ Filtered out: Low motivation match")
-                elif derived["pressure_compatibility"] <= pressure_threshold:
+                elif derived["pressure_compatibility"] <= thresholds['pressure']:
                     logger.info("❌ Filtered out: Low pressure compatibility")
-                elif derived["credit_access_level"] != required_credit_level:
+                elif derived["credit_access_level"] != thresholds['credit_level']:
                     logger.info("❌ Filtered out: Wrong credit level")
                 else:
                     logger.info("✅ Adding to recommendations")
-                    recommendations.append((chatroom_id, pred_score))
+                    item = RecommendationItem(
+                        chatroom_id=chatroom_id,
+                        predicted_score=float(pred_score),
+                        motivation_match=derived["motivation_match"],
+                        pressure_compatibility=derived["pressure_compatibility"],
+                        credit_level=derived["credit_access_level"],
+                        timestamp=datetime.datetime.now()
+                    )
+                    logger.debug(f"Created item: {item.dict()}")
+                    recommendations.append(item)
+                
             except Exception as e:
                 logger.error(f"Error predicting for chatroom {chatroom_id}: {e}")
+                logger.exception(e)  # Add full traceback
         
-        recommendations.sort(key=lambda x: x[1], reverse=True)
+        # Sort by predicted score
+        recommendations.sort(key=lambda x: x.predicted_score, reverse=True)
         logger.info(f"Returning {len(recommendations)} recommendations")
         return recommendations
 
@@ -273,6 +315,61 @@ class RecommendationSystem:
         interactions_df = pd.DataFrame(interactions_rows._current_rows)
         
         return users_df, chatrooms_df, interactions_df
+
+    def get_cached_recommendations(
+        self, 
+        user_id: str, 
+        filters: Optional[RecommendationFilter] = None,
+        generate_if_missing: bool = False
+    ) -> List[RecommendationItem]:
+        """Get cached recommendations if available"""
+        if user_id in self._recommendation_cache:
+            recs = self._recommendation_cache[user_id]
+            
+            # Apply filters if provided
+            if filters:
+                filtered_recs = []
+                for rec in recs:
+                    if filters.min_score and rec.predicted_score < filters.min_score:
+                        continue
+                    
+                    chatroom_row = self.session.execute("""
+                        SELECT topics, vibe_score 
+                        FROM chatrooms WHERE chatroom_id = %s
+                    """, (rec.chatroom_id,)).one()
+                    
+                    if filters.topics and not set(filters.topics).intersection(set(chatroom_row.topics)):
+                        continue
+                    
+                    if filters.min_vibe_score and chatroom_row.vibe_score < filters.min_vibe_score:
+                        continue
+                    
+                    filtered_recs.append(rec)
+                
+                if filters.top_k:
+                    filtered_recs = filtered_recs[:filters.top_k]
+                
+                return filtered_recs
+            
+            return recs
+        
+        # If not in cache and generation is allowed
+        if generate_if_missing:
+            recommendations = self.get_recommendations(user_id, filters=filters)
+            self._recommendation_cache[user_id] = recommendations
+            return recommendations
+        
+        return []  # Return empty list if not found and generation not allowed
+
+    def update_user_preferences(self, user_id: str, preferences: dict):
+        """Update user's recommendation preferences"""
+        self._user_preferences[user_id] = preferences
+        # Clear cached recommendations to force regeneration
+        self.clear_recommendations(user_id)
+
+    def clear_recommendations(self, user_id: str):
+        """Clear cached recommendations for a user"""
+        self._recommendation_cache.pop(user_id, None)
 
 if __name__ == "__main__":
     import argparse
@@ -312,13 +409,13 @@ if __name__ == "__main__":
             
             # Print the recommendations
             print(f"\nRecommendations for {args.user_id}:")
-            for chatroom_id, score in recommendations:
+            for rec in recommendations:
                 # Get chatroom name from DB instead of DataFrame
                 chatroom_row = rec_sys.session.execute("""
                     SELECT name FROM chatrooms WHERE chatroom_id = %s
-                """, (chatroom_id,)).one()
+                """, (rec.chatroom_id,)).one()
                 chatroom_name = chatroom_row.name
-                print(f"- {chatroom_name}: Predicted Satisfaction = {score:.2f}")
+                print(f"- {chatroom_name}: Predicted Satisfaction = {rec.predicted_score:.2f}")
                 
             # Print model info
             model_path = rec_sys._get_latest_model_path()
