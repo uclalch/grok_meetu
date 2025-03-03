@@ -9,8 +9,13 @@ from surprise import accuracy
 from cassandra.cluster import Cluster
 import logging
 from typing import List, Optional
-from ..api.api_models import RecommendationItem, RecommendationFilter
-from ..core.config import load_config
+import sys
+import os
+
+# Add parent directory to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+from backend.api.api_models import RecommendationItem, RecommendationFilter
+from backend.core.config import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +29,11 @@ class RecommendationSystem:
         )
         self.session = self.cluster.connect(config["DB_KEYSPACE"])
         self.model = None
-        self.model_dir = Path(config["MODEL_DIR"])
-        self.model_dir.mkdir(exist_ok=True)
+        
+        # Use absolute path for model directory
+        current_dir = Path(__file__).parent
+        self.model_dir = current_dir / 'models'
+        self.model_dir.mkdir(exist_ok=True, parents=True)  # Create parent directories if needed
         self.last_loaded_version = None  # Track last loaded version
         self._recommendation_cache = {}  # Simple in-memory cache
         self._user_preferences = {}      # Store user preferences

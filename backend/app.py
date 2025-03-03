@@ -2,7 +2,12 @@
 from fastapi import FastAPI, HTTPException, Query
 from typing import List, Optional
 import logging
-from .api.api_models import (
+import sys
+import os
+
+# Add parent directory to path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from backend.api.api_models import (
     CreateRecommendationRequest,
     RecommendationResponse,
     RecommendationFilter,
@@ -10,8 +15,8 @@ from .api.api_models import (
     BatchRecommendationResponse,
     UpdateRecommendationRequest
 )
-from .recommendation.recommend import RecommendationSystem
-from .core.config import load_config
+from backend.recommendation.recommend import RecommendationSystem
+from backend.core.config import load_config
 from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
@@ -39,6 +44,13 @@ async def create_recommendations(request: CreateRecommendationRequest):
                 detail=f"User {request.user_id} not found"
             )
         
+        # Check if model exists and is trained
+        if rec_sys.model is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No trained model available. Please train a model first using the admin API: curl -X POST 'http://localhost:8001/train'"
+            )
+        
         # Check model version and reload if needed
         current_path = rec_sys._get_latest_model_path()
         if current_path.exists():
@@ -58,27 +70,45 @@ async def create_recommendations(request: CreateRecommendationRequest):
             )
         
         # Generate new recommendations
-        recommendations = rec_sys.get_recommendations(
-            request.user_id,
-            filters=request.filters,
-            thresholds=request.thresholds
-        )
+        try:
+            recommendations = rec_sys.get_recommendations(
+                request.user_id,
+                filters=request.filters,
+                thresholds=request.thresholds
+            )
+        except ValueError as e:
+            # Convert ValueError to HTTPException
+            raise HTTPException(status_code=400, detail=str(e))
         
         # Store in cache
         rec_sys._recommendation_cache[request.user_id] = recommendations
         
         model_info = rec_sys._load_version_info(current_path)
+        
         return RecommendationResponse(
             user_id=request.user_id,
             recommendations=recommendations,
             filters_applied=request.filters,
             model_info=model_info,
-            cache_info={"source": "fresh", "timestamp": datetime.now()}
+            cache_info={
+                "source": "new",
+                "timestamp": datetime.now()
+            }
         )
 
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
+        # Log unexpected errors
         logger.error(f"Error generating recommendations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Convert to HTTPException with original error message
+        if "No trained model available" in str(e):
+            raise HTTPException(status_code=400, detail=str(e))
+        elif "not found" in str(e):
+            raise HTTPException(status_code=404, detail=str(e))
+        else:
+            raise HTTPException(status_code=500, detail=str(e))
 
 # curl 'http://localhost:8000/recommendations/U2'
 
