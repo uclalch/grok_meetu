@@ -7,13 +7,23 @@ services:
   
   backend:
     build: 
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     ports:
       - "8000:8000"
     depends_on:
       - scylla
     environment:
       - SCYLLA_HOSTS=scylla
+      - SCYLLA_PORT=9042
     volumes:
       - ./backend/recommendation/models:/app/recommendation/models 
+
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend 

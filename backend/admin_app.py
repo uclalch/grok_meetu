@@ -1,13 +1,15 @@
 # admin_app.py - Admin API for model management
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 import logging
 from .api.api_models import (
     TrainRequest, TrainResponse,
     ModelListResponse, ModelActivateResponse,
     ModelActivateRequest, ModelDeleteResponse
 )
-from .recommendation.recommend import RecommendationSystem
+from backend.recommendation.recommend import get_rec_sys
 from datetime import datetime
+from pydantic import BaseModel
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,27 +17,47 @@ logger = logging.getLogger(__name__)
 admin_app = FastAPI(title="Grok MeetU Admin API")
 
 # Initialize system
-rec_sys = RecommendationSystem()
+rec_sys = get_rec_sys()
+
+class TrainModelRequest(BaseModel):
+    test_size: float = 0.2
+    force: bool = False
+
+class ModelStatusResponse(BaseModel):
+    status: str
+    current_version: Optional[str] = None
+    last_trained: Optional[str] = None
+    metrics: Optional[dict] = None
 
 @admin_app.get("/")
 async def read_root():
     return {"message": "Welcome to Grok MeetU Admin API"}
 
-@admin_app.post("/train", response_model=TrainResponse)
-async def train_model(request: TrainRequest, background_tasks: BackgroundTasks):
-    """Train a new recommendation model"""
+@admin_app.post("/train")
+async def train_model(request: TrainModelRequest):
+    """Train a new model with optional parameters"""
     try:
-        background_tasks.add_task(
-            rec_sys.train_model,
-            force=request.force,
-            test_size=request.test_size
+        # Direct synchronous call instead of background task
+        predictions = rec_sys.train_model(
+            test_size=request.test_size,
+            force=request.force
         )
-        return TrainResponse(
-            message="Model training started in background",
-            version=datetime.now().strftime("%Y%m%d"),
-        )
+        
+        # Get the latest model info
+        model_path = rec_sys._get_latest_model_path()
+        version_info = rec_sys._load_version_info(model_path)
+        
+        return {
+            "status": "success",
+            "message": "Model trained successfully",
+            "predictions": len(predictions),
+            "version_info": version_info
+        }
+    except ValueError as e:
+        # Model exists error
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error training model: {e}")
+        logger.error(f"Training error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @admin_app.get("/models", response_model=ModelListResponse)
@@ -73,4 +95,26 @@ async def delete_model(version: str):
             deleted_version=version
         )
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_app.get("/model/status", response_model=ModelStatusResponse)
+async def get_model_status():
+    """Get current model status"""
+    try:
+        model_path = rec_sys._get_latest_model_path()
+        if not model_path.exists():
+            return ModelStatusResponse(
+                status="not_trained",
+                message="No trained model found"
+            )
+        
+        version_info = rec_sys._load_version_info(model_path)
+        return ModelStatusResponse(
+            status="ready",
+            current_version=version_info.get('timestamp'),
+            last_trained=version_info.get('timestamp'),
+            metrics=version_info.get('metrics')
+        )
+    except Exception as e:
+        logger.error(f"Status check error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 

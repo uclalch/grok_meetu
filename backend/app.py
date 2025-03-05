@@ -4,6 +4,9 @@ from typing import List, Optional
 import logging
 import sys
 import os
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from backend.recommendation.recommend import get_rec_sys
 
 # Add parent directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -15,17 +18,29 @@ from backend.api.api_models import (
     BatchRecommendationResponse,
     UpdateRecommendationRequest
 )
-from backend.recommendation.recommend import RecommendationSystem
 from backend.core.config import load_config
 from datetime import datetime
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging at the top of the file
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Grok MeetU Recommendation API")
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React app origin
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
+
 # Initialize system
-rec_sys = RecommendationSystem()
+rec_sys = get_rec_sys()
 
 @app.get("/")
 async def read_root():
@@ -36,20 +51,29 @@ async def read_root():
 @app.post("/recommendations", response_model=RecommendationResponse)
 async def create_recommendations(request: CreateRecommendationRequest):
     """Create recommendations for a user with optional filters"""
+    logger.info(f"Received recommendation request for user: {request.user_id}")
     try:
         # Validate user exists
         if not rec_sys._validate_user(request.user_id):
+            logger.error(f"User {request.user_id} not found")
             raise HTTPException(
                 status_code=404,
                 detail=f"User {request.user_id} not found"
             )
         
         # Check if model exists and is trained
+        logger.info("Checking model status...")
         if rec_sys.model is None:
-            raise HTTPException(
-                status_code=400,
-                detail="No trained model available. Please train a model first using the admin API: curl -X POST 'http://localhost:8001/train'"
-            )
+            logger.error("No model loaded")
+            try:
+                logger.info("Attempting to load model...")
+                rec_sys.load_model()
+            except Exception as e:
+                logger.error(f"Failed to load model: {e}")
+                raise HTTPException(
+                    status_code=400,
+                    detail="No trained model available. Please train a model first using the admin API: curl -X POST 'http://localhost:8001/train'"
+                )
         
         # Check model version and reload if needed
         current_path = rec_sys._get_latest_model_path()

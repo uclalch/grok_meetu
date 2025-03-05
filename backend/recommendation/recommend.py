@@ -19,9 +19,23 @@ from backend.core.config import load_config
 
 logger = logging.getLogger(__name__)
 
+# Add at the top of the file
+_rec_sys_instance = None
+
+def get_rec_sys():
+    """Get or create singleton RecommendationSystem instance"""
+    global _rec_sys_instance
+    if _rec_sys_instance is None:
+        logger.info("Creating new RecommendationSystem instance")
+        _rec_sys_instance = RecommendationSystem()
+    else:
+        logger.info("Returning existing RecommendationSystem instance")
+    return _rec_sys_instance
+
 class RecommendationSystem:
     def __init__(self, db_hosts=None, db_port=None):
         """Initialize with database connection instead of DataFrames"""
+        logger.info("Initializing RecommendationSystem")
         config = load_config()
         self.cluster = Cluster(
             db_hosts or config["SCYLLA_HOSTS"],
@@ -37,6 +51,7 @@ class RecommendationSystem:
         self.last_loaded_version = None  # Track last loaded version
         self._recommendation_cache = {}  # Simple in-memory cache
         self._user_preferences = {}      # Store user preferences
+        logger.info(f"RecommendationSystem initialized with model_dir: {self.model_dir}")
     
     def _get_latest_model_path(self) -> Path:
         """Get the path of today's model file if it exists"""
@@ -45,6 +60,7 @@ class RecommendationSystem:
     
     def load_model(self):
         """Load the latest trained model"""
+        logger.info("Loading model")
         model_path = self._get_latest_model_path()
         if not model_path.exists():
             raise ValueError(f"No trained model found for today at {model_path}")
@@ -101,6 +117,7 @@ class RecommendationSystem:
 
     def train_model(self, test_size=0.2, force=False):
         """Train and save a new model"""
+        logger.info(f"Training model (test_size={test_size}, force={force})")
         model_path = self._get_latest_model_path()
         
         if model_path.exists() and not force:
@@ -422,7 +439,7 @@ if __name__ == "__main__":
         print("\n❌ Warning: --user-id is ignored in train mode")
 
     # Run the system
-    rec_sys = RecommendationSystem()
+    rec_sys = get_rec_sys()
     
     if args.mode == 'train':
         rec_sys.train_model(force=args.force, test_size=args.test_size)
