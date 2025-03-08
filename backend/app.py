@@ -18,6 +18,7 @@ from backend.api.api_models import (
     BatchRecommendationResponse,
     UpdateRecommendationRequest
 )
+from backend.api.models.helloworld import HelloWorldItem
 from backend.core.config import load_config
 from datetime import datetime
 
@@ -41,6 +42,12 @@ app.add_middleware(
 
 # Initialize system
 rec_sys = get_rec_sys()
+
+@app.get("/helloworld", response_model=HelloWorldItem)
+async def read_root():
+    return HelloWorldItem(
+            say="HelloWorld000"
+        )
 
 @app.get("/")
 async def read_root():
