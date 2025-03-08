@@ -1,0 +1,82 @@
+# Node.js
+frontend/node_modules/
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/build/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.env
+.venv
+my_brand/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Models
+backend/recommendation/models/*.pkl
+backend/recommendation/models/*.json
+
+# Logs
+*.log
+
+# Backend specific
+backend/config/*.env
+backend/.env*
+backend/logs/
+backend/data/
+backend/tmp/
+backend/cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+coverage.xml
+.tox/
+
+# Misc
+.directory
+*.bak
+*.tmp
+*.temp
+.env* 

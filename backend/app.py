@@ -72,7 +72,7 @@ async def create_recommendations(request: CreateRecommendationRequest):
                 logger.error(f"Failed to load model: {e}")
                 raise HTTPException(
                     status_code=400,
-                    detail="No trained model available. Please train a model first using the admin API: curl -X POST 'http://localhost:8001/train'"
+                    detail="No trained model available. Please train a model first using the admin API: curl -X POST 'http://localhost:8001/train' -H 'Content-Type: application/json' -d '{""test_size"": 0.2, ""force"": true}''"
                 )
         
         # Check model version and reload if needed
